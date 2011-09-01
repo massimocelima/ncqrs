@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.Serialization.Formatters.Binary;
 using System.Reflection;
+using System.Threading;
 using Ncqrs.Eventing.Sourcing;
 using Ncqrs.Eventing.Sourcing.Snapshotting;
 using Ncqrs.Eventing.Storage.Serialization;
@@ -23,6 +24,7 @@ namespace Ncqrs.Eventing.Storage.SQL
         private readonly IEventFormatter<JObject> _formatter;
         private readonly IEventTranslator<string> _translator;
         private readonly IEventConverter _converter;
+        int _initialized;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="MsSqlServerEventStore"/> class.
@@ -53,6 +55,25 @@ namespace Ncqrs.Eventing.Storage.SQL
             _converter = converter ?? new NullEventConverter();
             _formatter = new JsonEventFormatter(typeResolver ?? new SimpleEventTypeResolver());
             _translator = new StringEventTranslator();
+
+            InitializeEventStore();
+        }
+
+        private void InitializeEventStore()
+        {
+            if (Interlocked.Increment(ref _initialized) > 1)
+                return;
+
+            var query = GetEventStoreInitializationQuery();
+
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                using (var command = new SqlCommand(query, connection))
+                {
+                    connection.Open();
+                    command.ExecuteNonQuery();
+                }
+            }
         }
 
         /// <summary>
@@ -82,6 +103,21 @@ namespace Ncqrs.Eventing.Storage.SQL
             }
 
             return result;
+        }
+
+        private static string GetEventStoreInitializationQuery()
+        {
+            var currentAsm = Assembly.GetExecutingAssembly();
+
+            const string resourcename = "Ncqrs.Eventing.Storage.SQL.TableCreationScript.sql";
+            var resource = currentAsm.GetManifestResourceStream(resourcename);
+
+            if (resource == null) throw new ApplicationException("Could not find the resource " + resourcename + " in assembly " + currentAsm.FullName);
+
+            using (var reader = new StreamReader(resource))
+            {
+                return reader.ReadToEnd();
+            }
         }
 
         /// <summary>
@@ -414,15 +450,19 @@ namespace Ncqrs.Eventing.Storage.SQL
         /// </summary>
         /// <param name="eventSourceId">The <see cref="EventSource.EventSourceId"/> that is being updated.</param>
         /// <param name="newVersion">Indicates the new version to use.</param>
+        /// /// <param name="initialVersion">The initial version (used to ensure concurrency).</param>
         /// <param name="transaction">The transaction to enlist in while performing the action.</param>
-        private static void UpdateEventSourceVersion(Guid eventSourceId, long newVersion, SqlTransaction transaction)
+        /// <returns>True if successfully updated</returns>
+        private static bool UpdateEventSourceVersion(Guid eventSourceId, long newVersion, long initialVersion, SqlTransaction transaction)
         {
             using (var command = new SqlCommand(Queries.UpdateEventSourceVersionQuery, transaction.Connection))
             {
                 command.Transaction = transaction;
                 command.Parameters.AddWithValue("Id", eventSourceId);
                 command.Parameters.AddWithValue("NewVersion", newVersion);
-                command.ExecuteNonQuery();
+                command.Parameters.AddWithValue("InitialVersion", initialVersion);
+                var rowsUpdated = command.ExecuteNonQuery();
+                return rowsUpdated != 0;
             }
         }
 
@@ -522,12 +562,24 @@ namespace Ncqrs.Eventing.Storage.SQL
             {
                 throw new ConcurrencyException(eventSourceId, eventSourceVersion);
             }
-
+            else
+            {
+                UpdateTheVersionOfTheEventSource(eventSourceId, eventSourceVersion, transaction, initialVersion);
+            }
+            
             // Save all events to the store.
             SaveEvents(events, transaction);
+        }
 
-            // Update the version of the provider.
-            UpdateEventSourceVersion(eventSourceId, eventSourceVersion, transaction);
+        static void UpdateTheVersionOfTheEventSource(Guid eventSourceId, long eventSourceVersion, SqlTransaction transaction,
+                                                  long initialVersion)
+        {
+            var updated = UpdateEventSourceVersion(eventSourceId, eventSourceVersion, initialVersion, transaction);
+
+            if (!updated)
+            {
+                throw new ConcurrencyException(eventSourceId, eventSourceVersion);
+            }
         }
 
         /// <summary>
