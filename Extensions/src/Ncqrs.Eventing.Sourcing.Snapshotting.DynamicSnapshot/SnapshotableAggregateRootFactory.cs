@@ -9,6 +9,8 @@ namespace Ncqrs.Eventing.Sourcing.Snapshotting.DynamicSnapshot
         private readonly SnapshotableImplementerFactory _snapshotableImplementerFactory;
         private readonly IDynamicSnapshotAssembly _dynamicSnapshotAssembly;
 
+        private readonly static ProxyGenerator Generator = new ProxyGenerator();
+
         public SnapshotableAggregateRootFactory(IDynamicSnapshotAssembly dynamicSnapshotAssembly, SnapshotableImplementerFactory snapshotableImplementerFactory)
         {
             _snapshotableImplementerFactory = snapshotableImplementerFactory;
@@ -22,12 +24,11 @@ namespace Ncqrs.Eventing.Sourcing.Snapshotting.DynamicSnapshot
 
             var snapshotType = _dynamicSnapshotAssembly.FindSnapshotType(aggregateType);
             var snapshotableImplementer = _snapshotableImplementerFactory.Create(snapshotType);
-            var generator = new ProxyGenerator();
 
             var options = new ProxyGenerationOptions();
             options.AddMixinInstance(snapshotableImplementer);
 
-            var proxy = (AggregateRoot)generator.CreateClassProxy(aggregateType, options);
+            var proxy = (AggregateRoot)Generator.CreateClassProxy(aggregateType, options);
             ((IHaveProxyReference)proxy).Proxy = proxy;
 
             return proxy;
